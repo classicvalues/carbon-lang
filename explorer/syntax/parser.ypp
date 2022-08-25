@@ -59,9 +59,9 @@
   #include <cstdlib>
   #include <vector>
 
-  #include "common/check.h"
   #include "explorer/syntax/parse_and_lex_context.h"
   #include "llvm/ADT/StringExtras.h"
+  #include "llvm/Support/FormatVariadic.h"
   #include "llvm/Support/raw_ostream.h"
 }  // %code top
 
@@ -104,6 +104,8 @@
 %type <std::vector<LibraryName>> import_directives
 %type <std::string> optional_library_path
 %type <bool> api_or_impl
+%type <ClassExtensibility> class_declaration_extensibility
+%type <std::optional<Nonnull<Expression*>>> class_declaration_extends
 %type <Nonnull<Declaration*>> declaration
 %type <Nonnull<FunctionDeclaration*>> function_declaration
 %type <Nonnull<AliasDeclaration*>> alias_declaration
@@ -188,10 +190,12 @@
 %type <std::vector<Nonnull<AlternativeSignature*>>> alternative_list_contents
 %type <BisonWrap<Match::Clause>> clause
 %type <std::vector<Match::Clause>> clause_list
+%type <Operator> comparison_operator;
 
 %token
   // Most tokens have their spelling defined in lexer.lpp.
   // table-begin
+  ABSTRACT
   ADDR
   ALIAS
   AMPERSAND
@@ -201,6 +205,7 @@
   AS
   AUTO
   AWAIT
+  BASE
   BOOL
   BREAK
   CARET
@@ -218,20 +223,27 @@
   ELSE
   EQUAL
   EQUAL_EQUAL
+  EXTENDS
   EXTERNAL
   FALSE
   FN
   FN_TYPE
+  FOR
   FORALL
+  GREATER
+  GREATER_EQUAL
   GREATER_GREATER
   IF
   IMPL
   IMPORT
+  IN
   INTERFACE
   IS
   LEFT_CURLY_BRACE
   LEFT_PARENTHESIS
   LEFT_SQUARE_BRACKET
+  LESS
+  LESS_EQUAL
   LESS_LESS
   LET
   LIBRARY
@@ -337,11 +349,18 @@ primary_expression:
     { $$ = arena->New<BoolLiteral>(context.source_loc(), false); }
 | sized_type_literal
     {
-      int val;
-      CARBON_CHECK(llvm::to_integer(llvm::StringRef($1).substr(1), val));
-      CARBON_CHECK($1[0] == 'i' && val == 32)
-          << "Only i32 is supported for now: " << $1;
-      $$ = arena->New<IntTypeLiteral>(context.source_loc());
+      int val = 0;
+      if (!llvm::to_integer(llvm::StringRef($1).substr(1), val)) {
+        context.RecordSyntaxError(
+            llvm::formatv("Invalid type literal: {0}", $1));
+        YYERROR;
+      } else if ($1[0] != 'i' || val != 32) {
+        context.RecordSyntaxError(
+            llvm::formatv("Only i32 is supported for now: {0}", $1));
+        YYERROR;
+      } else {
+        $$ = arena->New<IntTypeLiteral>(context.source_loc());
+      }
     }
 | SELF
     // TODO: Should we create a new TypeLiteral for `Self`?
@@ -579,12 +598,25 @@ comparison_operand:
   ref_deref_expression
 | value_expression
 ;
+/* TODO: Add NOT_EQUAL */
+comparison_operator:
+  EQUAL_EQUAL
+    { $$ = Operator::Eq; }
+| LESS
+    { $$ = Operator::Less; }
+| LESS_EQUAL
+    { $$ = Operator::LessEq; }
+|  GREATER
+    { $$ = Operator::Greater; }
+| GREATER_EQUAL
+    { $$ = Operator::GreaterEq; }
+;
 comparison_expression:
   value_expression
-| comparison_operand EQUAL_EQUAL comparison_operand
+| comparison_operand comparison_operator comparison_operand
     {
       $$ = arena->New<OperatorExpression>(
-          context.source_loc(), Operator::Eq,
+          context.source_loc(), $2,
           std::vector<Nonnull<Expression*>>({$1, $3}));
     }
 ;
@@ -866,6 +898,12 @@ statement:
           context.source_loc(), $2, $4, ValueCategory::Var,
           VariableDefinition::DefinitionType::Var);
     }
+| RETURNED VAR variable_declaration SEMICOLON
+    {
+      $$ = arena->New<VariableDefinition>(
+          context.source_loc(), $3, std::nullopt, ValueCategory::Var,
+          VariableDefinition::DefinitionType::Returned);
+    }
 | RETURNED VAR variable_declaration EQUAL expression SEMICOLON
     {
       $$ = arena->New<VariableDefinition>(
@@ -905,6 +943,8 @@ statement:
     { $$ = arena->New<Run>(context.source_loc(), $2); }
 | AWAIT SEMICOLON
     { $$ = arena->New<Await>(context.source_loc()); }
+| FOR LEFT_PARENTHESIS variable_declaration IN type_expression RIGHT_PARENTHESIS block
+    { $$ = arena->New<For>(context.source_loc(), $3, $5, $7); }
 ;
 if_statement:
   IF LEFT_PARENTHESIS expression RIGHT_PARENTHESIS block optional_else
@@ -1059,17 +1099,31 @@ type_params:
 | tuple_pattern
     { $$ = $1; }
 ;
+class_declaration_extensibility:
+  // Empty
+    { $$ = Carbon::ClassExtensibility::None; }
+| ABSTRACT
+    { $$ = Carbon::ClassExtensibility::Abstract; }
+| BASE
+    { $$ = Carbon::ClassExtensibility::Base; }
+;
+class_declaration_extends:
+  // Empty
+    { $$ = std::nullopt; }
+| EXTENDS expression
+    { $$ = $2; }
+;
 declaration:
   function_declaration
     { $$ = $1; }
-| CLASS identifier type_params LEFT_CURLY_BRACE declaration_list RIGHT_CURLY_BRACE
+| class_declaration_extensibility CLASS identifier type_params class_declaration_extends LEFT_CURLY_BRACE declaration_list RIGHT_CURLY_BRACE
     {
       $$ = arena->New<ClassDeclaration>(
-          context.source_loc(), $2,
-          arena->New<SelfDeclaration>(context.source_loc()), $3, $5);
+          context.source_loc(), $3,
+          arena->New<SelfDeclaration>(context.source_loc()), $1, $4, $5, $7);
     }
-| CHOICE identifier LEFT_CURLY_BRACE alternative_list RIGHT_CURLY_BRACE
-    { $$ = arena->New<ChoiceDeclaration>(context.source_loc(), $2, $4); }
+| CHOICE identifier type_params LEFT_CURLY_BRACE alternative_list RIGHT_CURLY_BRACE
+    { $$ = arena->New<ChoiceDeclaration>(context.source_loc(), $2, $3, $5); }
 | VAR variable_declaration SEMICOLON
     {
       $$ = arena->New<VariableDeclaration>(context.source_loc(), $2,

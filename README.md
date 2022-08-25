@@ -172,7 +172,7 @@ C++ code like this:
 <a href="docs/images/snippets.md#c">
 <!--
 Edit snippet in docs/images/snippets.md and:
-https://drive.google.com/drive/folders/1-rsUjiya7dSZ87L8kpZmu3MZghRVxzLA
+https://drive.google.com/drive/folders/1QrBXiy_X74YsOueeC0IYlgyolWIhvusB
 -->
 <img src="docs/images/cpp_snippet.svg" width="600"
      alt="A snippet of C++ code. Follow the link to read it.">
@@ -183,7 +183,7 @@ corresponds to this Carbon code:
 <a href="docs/images/snippets.md#carbon">
 <!--
 Edit snippet in docs/images/snippets.md and:
-https://drive.google.com/drive/folders/1-rsUjiya7dSZ87L8kpZmu3MZghRVxzLA
+https://drive.google.com/drive/folders/1QrBXiy_X74YsOueeC0IYlgyolWIhvusB
 -->
 <img src="docs/images/carbon_snippet.svg" width="600"
      alt="A snippet of converted Carbon code. Follow the link to read it.">
@@ -196,7 +196,7 @@ new Carbon on top of your existing C++ investment. For example:
 <a href="docs/images/snippets.md#mixed">
 <!--
 Edit snippet in docs/images/snippets.md and:
-https://drive.google.com/drive/folders/1-rsUjiya7dSZ87L8kpZmu3MZghRVxzLA
+https://drive.google.com/drive/folders/1QrBXiy_X74YsOueeC0IYlgyolWIhvusB
 -->
 <img src="docs/images/mixed_snippet.svg" width="600"
      alt="A snippet of mixed Carbon and C++ code. Follow the link to read it.">
@@ -266,8 +266,11 @@ semantics onto C++ such as Rust-inspired
 
 ## Getting started
 
-You can get started playing with Carbon by checking out the codebase and using
-the Carbon explorer:
+As there is no compiler yet, to try out Carbon, you can use the Carbon explorer
+to interpret Carbon code and print its output. You can try it out immediately at
+[compiler-explorer.com](http://carbon.compiler-explorer.com/).
+
+To build the Carbon explorer yourself, follow these instructions:
 
 ```shell
 # Install bazelisk using Homebrew.

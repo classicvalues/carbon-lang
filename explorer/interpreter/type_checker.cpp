@@ -516,6 +516,7 @@ auto TypeChecker::ImplicitlyConvert(const std::string& context,
                                     Nonnull<const Value*> destination)
     -> ErrorOr<Nonnull<Expression*>> {
   Nonnull<const Value*> source_type = &source->static_type();
+
   // TODO: If a builtin conversion works, for now we don't create any
   // expression to do the conversion and rely on the interpreter to know how to
   // do it.
@@ -659,6 +660,18 @@ auto TypeChecker::ArgumentDeduction(
   switch (param->kind()) {
     case Value::Kind::VariableType: {
       const auto& var_type = cast<VariableType>(*param);
+      const auto& binding = cast<VariableType>(*param).binding();
+      if (binding.has_static_type()) {
+        const Value* binding_type = Substitute(deduced, &binding.static_type());
+        if (!IsTypeOfType(binding_type)) {
+          if (!IsImplicitlyConvertible(arg, binding_type, impl_scope, false)) {
+            return CompilationError(source_loc)
+                   << "cannot convert deduced value " << *arg << " for "
+                   << binding.name() << " to parameter type " << *binding_type;
+          }
+        }
+      }
+
       if (std::find(bindings_to_deduce.begin(), bindings_to_deduce.end(),
                     &var_type.binding()) != bindings_to_deduce.end()) {
         auto [it, success] = deduced.insert({&var_type.binding(), arg});
@@ -840,8 +853,9 @@ auto TypeChecker::ArgumentDeduction(
     case Value::Kind::TypeOfConstraintType:
     case Value::Kind::TypeOfChoiceType:
     case Value::Kind::TypeOfParameterizedEntityName:
-    case Value::Kind::TypeOfMemberName:
+    case Value::Kind::TypeOfMemberName: {
       return handle_non_deduced_type();
+    }
     case Value::Kind::ImplWitness:
     case Value::Kind::SymbolicWitness:
     case Value::Kind::ParameterizedEntityName:
@@ -1314,7 +1328,6 @@ auto TypeChecker::DeduceCallBindings(
            << "wrong number of arguments in function call, expected "
            << params.size() << " but got " << args.size();
   }
-
   // Bindings for deduced parameters and generic parameters.
   BindingMap generic_bindings;
 
@@ -1370,9 +1383,12 @@ auto TypeChecker::DeduceCallBindings(
 
   // Convert the arguments to the parameter type.
   Nonnull<const Value*> param_type = Substitute(generic_bindings, params_type);
+
+  // Convert the arguments to the deduced and substituted parameter type.
   CARBON_ASSIGN_OR_RETURN(
       Nonnull<Expression*> converted_argument,
       ImplicitlyConvert("call", impl_scope, &call.argument(), param_type));
+
   call.set_argument(converted_argument);
 
   return Success();
@@ -1728,9 +1744,15 @@ auto TypeChecker::TypeCheckExp(Nonnull<Expression*> e,
                        << " does not have an alternative named "
                        << access.member_name();
               }
-              Nonnull<const Value*> type =
-                  arena_->New<FunctionType>(*parameter_types, llvm::None,
-                                            &choice, llvm::None, llvm::None);
+              Nonnull<const Value*> substituted_parameter_type =
+                  *parameter_types;
+              if (choice.IsParameterized()) {
+                substituted_parameter_type =
+                    Substitute(choice.type_args(), *parameter_types);
+              }
+              Nonnull<const Value*> type = arena_->New<FunctionType>(
+                  substituted_parameter_type, llvm::None, &choice, llvm::None,
+                  llvm::None);
               // TODO: Should there be a Declaration corresponding to each
               // choice type alternative?
               access.set_member(Member(arena_->New<NamedValue>(
@@ -2086,6 +2108,62 @@ auto TypeChecker::TypeCheckExp(Nonnull<Expression*> e,
           op.set_rewritten_form(*converted);
           return Success();
         }
+        case Operator::Less: {
+          ErrorOr<Nonnull<Expression*>> converted = BuildBuiltinMethodCall(
+              impl_scope, op.arguments()[0],
+              BuiltinInterfaceName{Builtins::LessWith, ts[1]},
+              BuiltinMethodCall{"Less", op.arguments()[1]});
+          if (!converted.ok()) {
+            // We couldn't find a matching `impl`.
+            return CompilationError(e->source_loc())
+                   << *ts[0] << " is not less comparable with " << *ts[1]
+                   << " (" << converted.error().message() << ")";
+          }
+          op.set_rewritten_form(*converted);
+          return Success();
+        }
+        case Operator::LessEq: {
+          ErrorOr<Nonnull<Expression*>> converted = BuildBuiltinMethodCall(
+              impl_scope, op.arguments()[0],
+              BuiltinInterfaceName{Builtins::LessEqWith, ts[1]},
+              BuiltinMethodCall{"LessEq", op.arguments()[1]});
+          if (!converted.ok()) {
+            // We couldn't find a matching `impl`.
+            return CompilationError(e->source_loc())
+                   << *ts[0] << " is not less equal comparable with " << *ts[1]
+                   << " (" << converted.error().message() << ")";
+          }
+          op.set_rewritten_form(*converted);
+          return Success();
+        }
+        case Operator::GreaterEq: {
+          ErrorOr<Nonnull<Expression*>> converted = BuildBuiltinMethodCall(
+              impl_scope, op.arguments()[0],
+              BuiltinInterfaceName{Builtins::GreaterEqWith, ts[1]},
+              BuiltinMethodCall{"GreaterEq", op.arguments()[1]});
+          if (!converted.ok()) {
+            // We couldn't find a matching `impl`.
+            return CompilationError(e->source_loc())
+                   << *ts[0] << " is not greater equal comparable with "
+                   << *ts[1] << " (" << converted.error().message() << ")";
+          }
+          op.set_rewritten_form(*converted);
+          return Success();
+        }
+        case Operator::Greater: {
+          ErrorOr<Nonnull<Expression*>> converted = BuildBuiltinMethodCall(
+              impl_scope, op.arguments()[0],
+              BuiltinInterfaceName{Builtins::GreaterWith, ts[1]},
+              BuiltinMethodCall{"Greater", op.arguments()[1]});
+          if (!converted.ok()) {
+            // We couldn't find a matching `impl`.
+            return CompilationError(e->source_loc())
+                   << *ts[0] << " is not greater comparable with " << *ts[1]
+                   << " (" << converted.error().message() << ")";
+          }
+          op.set_rewritten_form(*converted);
+          return Success();
+        }
         case Operator::Deref:
           CARBON_RETURN_IF_ERROR(
               ExpectPointerType(e->source_loc(), "*", ts[0]));
@@ -2206,12 +2284,22 @@ auto TypeChecker::TypeCheckExp(Nonnull<Expression*> e,
               call.set_value_category(ValueCategory::Let);
               break;
             }
+            case DeclarationKind::ChoiceDeclaration: {
+              Nonnull<ChoiceType*> ct = arena_->New<ChoiceType>(
+                  cast<ChoiceDeclaration>(&decl), bindings);
+              Nonnull<TypeOfChoiceType*> inst_choice_type =
+                  arena_->New<TypeOfChoiceType>(ct);
+              call.set_static_type(inst_choice_type);
+              call.set_value_category(ValueCategory::Let);
+              break;
+            }
             default:
               CARBON_FATAL()
                   << "unknown type of ParameterizedEntityName for " << decl;
           }
           return Success();
         }
+        case Value::Kind::TypeOfChoiceType:
         default: {
           return CompilationError(e->source_loc())
                  << "in call `" << *e
@@ -2311,6 +2399,21 @@ auto TypeChecker::TypeCheckExp(Nonnull<Expression*> e,
           e->set_value_category(ValueCategory::Let);
           return Success();
         }
+        case IntrinsicExpression::Intrinsic::IntCompare: {
+          if (args.size() != 2) {
+            return CompilationError(e->source_loc())
+                   << "__intrinsic_int_compare takes 2 arguments";
+          }
+          CARBON_RETURN_IF_ERROR(ExpectExactType(
+              e->source_loc(), "__intrinsic_int_compare argument 1",
+              arena_->New<IntType>(), &args[0]->static_type(), impl_scope));
+          CARBON_RETURN_IF_ERROR(ExpectExactType(
+              e->source_loc(), "__intrinsic_int_compare argument 2",
+              arena_->New<IntType>(), &args[1]->static_type(), impl_scope));
+          e->set_static_type(arena_->New<IntType>());
+          e->set_value_category(ValueCategory::Let);
+          return Success();
+        }
         case IntrinsicExpression::Intrinsic::StrEq: {
           if (args.size() != 2) {
             return CompilationError(e->source_loc())
@@ -2323,6 +2426,21 @@ auto TypeChecker::TypeCheckExp(Nonnull<Expression*> e,
               e->source_loc(), "__intrinsic_str_eq argument 2",
               arena_->New<StringType>(), &args[1]->static_type(), impl_scope));
           e->set_static_type(arena_->New<BoolType>());
+          e->set_value_category(ValueCategory::Let);
+          return Success();
+        }
+        case IntrinsicExpression::Intrinsic::StrCompare: {
+          if (args.size() != 2) {
+            return CompilationError(e->source_loc())
+                   << "__intrinsic_str_compare takes 2 arguments";
+          }
+          CARBON_RETURN_IF_ERROR(ExpectExactType(
+              e->source_loc(), "__intrinsic_str_compare argument 1",
+              arena_->New<StringType>(), &args[0]->static_type(), impl_scope));
+          CARBON_RETURN_IF_ERROR(ExpectExactType(
+              e->source_loc(), "__intrinsic_str_compare argument 2",
+              arena_->New<StringType>(), &args[1]->static_type(), impl_scope));
+          e->set_static_type(arena_->New<IntType>());
           e->set_value_category(ValueCategory::Let);
           return Success();
         }
@@ -2750,9 +2868,15 @@ auto TypeChecker::TypeCheckPattern(
                << "'" << alternative.alternative_name()
                << "' is not an alternative of " << choice_type;
       }
-      CARBON_RETURN_IF_ERROR(TypeCheckPattern(&alternative.arguments(),
-                                              *parameter_types, impl_scope,
-                                              enclosing_value_category));
+
+      Nonnull<const Value*> substituted_parameter_type = *parameter_types;
+      if (choice_type.IsParameterized()) {
+        substituted_parameter_type =
+            Substitute(choice_type.type_args(), *parameter_types);
+      }
+      CARBON_RETURN_IF_ERROR(
+          TypeCheckPattern(&alternative.arguments(), substituted_parameter_type,
+                           impl_scope, enclosing_value_category));
       alternative.set_static_type(&choice_type);
       CARBON_ASSIGN_OR_RETURN(
           Nonnull<const Value*> alternative_value,
@@ -2861,6 +2985,29 @@ auto TypeChecker::TypeCheckStmt(Nonnull<Statement*> s,
                             &while_stmt.condition(), arena_->New<BoolType>()));
       while_stmt.set_condition(converted_condition);
       CARBON_RETURN_IF_ERROR(TypeCheckStmt(&while_stmt.body(), impl_scope));
+      return Success();
+    }
+    case StatementKind::For: {
+      auto& for_stmt = cast<For>(*s);
+      ImplScope inner_impl_scope;
+      inner_impl_scope.AddParent(&impl_scope);
+
+      CARBON_RETURN_IF_ERROR(
+          TypeCheckExp(&for_stmt.loop_target(), inner_impl_scope));
+
+      const Value& rhs = for_stmt.loop_target().static_type();
+      if (rhs.kind() == Value::Kind::StaticArrayType) {
+        CARBON_RETURN_IF_ERROR(
+            TypeCheckPattern(&for_stmt.variable_declaration(),
+                             &cast<StaticArrayType>(rhs).element_type(),
+                             inner_impl_scope, ValueCategory::Var));
+
+      } else {
+        return CompilationError(for_stmt.source_loc())
+               << "expected array type after in, found value of type " << rhs;
+      }
+
+      CARBON_RETURN_IF_ERROR(TypeCheckStmt(&for_stmt.body(), inner_impl_scope));
       return Success();
     }
     case StatementKind::Break:
@@ -3061,6 +3208,7 @@ auto TypeChecker::ExpectReturnOnAllPaths(
     case StatementKind::Assign:
     case StatementKind::ExpressionStatement:
     case StatementKind::While:
+    case StatementKind::For:
     case StatementKind::Break:
     case StatementKind::Continue:
     case StatementKind::VariableDefinition:
@@ -3204,6 +3352,15 @@ auto TypeChecker::DeclareClassDeclaration(Nonnull<ClassDeclaration*> class_decl,
 
   ImplScope class_scope;
   class_scope.AddParent(scope_info.innermost_scope);
+
+  if (class_decl->extensibility() != ClassExtensibility::None) {
+    return CompilationError(class_decl->source_loc())
+           << "Class prefixes `base` and `abstract` are not supported yet";
+  }
+  if (class_decl->extends()) {
+    return CompilationError(class_decl->source_loc())
+           << "Class extension with `extends` is not supported yet";
+  }
 
   std::vector<Nonnull<const GenericBinding*>> bindings = scope_info.bindings;
   if (class_decl->type_params().has_value()) {
@@ -3667,6 +3824,23 @@ auto TypeChecker::TypeCheckImplDeclaration(Nonnull<ImplDeclaration*> impl_decl,
 auto TypeChecker::DeclareChoiceDeclaration(Nonnull<ChoiceDeclaration*> choice,
                                            const ScopeInfo& scope_info)
     -> ErrorOr<Success> {
+  ImplScope choice_scope;
+  choice_scope.AddParent(scope_info.innermost_scope);
+  std::vector<Nonnull<const GenericBinding*>> bindings = scope_info.bindings;
+  if (choice->type_params().has_value()) {
+    Nonnull<TuplePattern*> type_params = *choice->type_params();
+    CARBON_RETURN_IF_ERROR(TypeCheckPattern(type_params, std::nullopt,
+                                            choice_scope, ValueCategory::Let));
+    CollectGenericBindingsInPattern(type_params, bindings);
+    if (trace_stream_) {
+      **trace_stream_ << choice_scope;
+    }
+  }
+  BindingMap generic_args;
+  for (auto* binding : bindings) {
+    generic_args[binding] = *binding->symbolic_identity();
+  }
+
   std::vector<NamedValue> alternatives;
   for (Nonnull<AlternativeSignature*> alternative : choice->alternatives()) {
     CARBON_ASSIGN_OR_RETURN(auto signature,
@@ -3674,7 +3848,20 @@ auto TypeChecker::DeclareChoiceDeclaration(Nonnull<ChoiceDeclaration*> choice,
                                              *scope_info.innermost_scope));
     alternatives.push_back({.name = alternative->name(), .value = signature});
   }
-  auto ct = arena_->New<ChoiceType>(choice->name(), std::move(alternatives));
+  choice->set_members(alternatives);
+  if (choice->type_params().has_value()) {
+    Nonnull<ParameterizedEntityName*> param_name =
+        arena_->New<ParameterizedEntityName>(choice, *choice->type_params());
+    SetConstantValue(choice, param_name);
+    choice->set_static_type(
+        arena_->New<TypeOfParameterizedEntityName>(param_name));
+    return Success();
+  }
+
+  auto ct = arena_->New<ChoiceType>(
+      choice,
+      arena_->New<Bindings>(std::move(generic_args), Bindings::NoWitnesses));
+
   SetConstantValue(choice, ct);
   choice->set_static_type(arena_->New<TypeOfChoiceType>(ct));
   return Success();

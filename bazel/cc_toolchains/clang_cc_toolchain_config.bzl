@@ -19,6 +19,7 @@ load(
 load("@bazel_tools//tools/build_defs/cc:action_names.bzl", "ACTION_NAMES")
 load(
     ":clang_detected_variables.bzl",
+    "clang_bindir",
     "clang_include_dirs_list",
     "clang_resource_dir",
     "llvm_bindir",
@@ -68,9 +69,9 @@ all_link_actions = [
 def _impl(ctx):
     tool_paths = [
         tool_path(name = "ar", path = llvm_bindir + "/llvm-ar"),
-        tool_path(name = "ld", path = llvm_bindir + "/ld.lld"),
-        tool_path(name = "cpp", path = llvm_bindir + "/clang-cpp"),
-        tool_path(name = "gcc", path = llvm_bindir + "/clang++"),
+        tool_path(name = "ld", path = clang_bindir + "/ld.lld"),
+        tool_path(name = "cpp", path = clang_bindir + "/clang-cpp"),
+        tool_path(name = "gcc", path = clang_bindir + "/clang++"),
         tool_path(name = "dwp", path = llvm_bindir + "/llvm-dwp"),
         tool_path(name = "gcov", path = llvm_bindir + "/llvm-cov"),
         tool_path(name = "nm", path = llvm_bindir + "/llvm-nm"),
@@ -80,13 +81,13 @@ def _impl(ctx):
     ]
 
     action_configs = [
-        action_config(action_name = name, enabled = True, tools = [tool(path = llvm_bindir + "/clang")])
+        action_config(action_name = name, enabled = True, tools = [tool(path = clang_bindir + "/clang")])
         for name in all_c_compile_actions
     ] + [
-        action_config(action_name = name, enabled = True, tools = [tool(path = llvm_bindir + "/clang++")])
+        action_config(action_name = name, enabled = True, tools = [tool(path = clang_bindir + "/clang++")])
         for name in all_cpp_compile_actions
     ] + [
-        action_config(action_name = name, enabled = True, tools = [tool(path = llvm_bindir + "/clang++")])
+        action_config(action_name = name, enabled = True, tools = [tool(path = clang_bindir + "/clang++")])
         for name in all_link_actions
     ] + [
         action_config(action_name = name, enabled = True, tools = [tool(path = llvm_bindir + "/llvm-ar")])
@@ -95,6 +96,11 @@ def _impl(ctx):
         action_config(action_name = name, enabled = True, tools = [tool(path = llvm_bindir + "/llvm-strip")])
         for name in [ACTION_NAMES.strip]
     ]
+
+    std_compile_flags = ["-std=c++17"]
+    # libc++ is only used on non-Windows platforms.
+    if ctx.attr.target_cpu != "x64_windows":
+        std_compile_flags.append("-stdlib=libc++")
 
     default_flags_feature = feature(
         name = "default_flags",
@@ -152,10 +158,7 @@ def _impl(ctx):
                 actions = all_cpp_compile_actions + all_link_actions,
                 flag_groups = ([
                     flag_group(
-                        flags = [
-                            "-std=c++17",
-                            "-stdlib=libc++",
-                        ],
+                        flags = std_compile_flags,
                     ),
                 ]),
             ),
@@ -311,12 +314,16 @@ def _impl(ctx):
     # minimal settings if both are enabled.
     minimal_debug_info_flags = feature(
         name = "minimal_debug_info_flags",
-        flag_sets = [flag_set(
-            actions = codegen_compile_actions,
-            flag_groups = [flag_group(flags = [
-                "-gmlt",
-            ])],
-        )],
+        flag_sets = [
+            flag_set(
+                actions = codegen_compile_actions,
+                flag_groups = [
+                    flag_group(
+                        flags = ["-gmlt"],
+                    ),
+                ],
+            ),
+        ],
     )
     default_debug_info_flags = feature(
         name = "default_debug_info_flags",
@@ -780,6 +787,11 @@ def _impl(ctx):
     # features are order sensitive. We also setup the sysroot here.
     if ctx.attr.target_cpu == "k8":
         features += [linux_flags_feature]
+        sysroot = None
+    elif ctx.attr.target_cpu == "x64_windows":
+        # TODO: Need to figure out if we need to add windows specific features
+        # I think the .pdb debug files will need to be handled differently,
+        # so that might be an example where a feature must be added.
         sysroot = None
     elif ctx.attr.target_cpu in ["darwin", "darwin_arm64"]:
         sysroot = sysroot_dir

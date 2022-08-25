@@ -60,6 +60,10 @@ message OperatorExpression {
     BitwiseXor = 17;
     BitShiftLeft = 18;
     BitShiftRight = 19;
+    Less = 20;
+    LessEq = 21;
+    Greater = 22;
+    GreaterEq = 23;
   }
   optional Operator op = 1;
   repeated Expression arguments = 2;
@@ -261,6 +265,12 @@ message WhileStatement {
   optional BlockStatement body = 2;
 }
 
+message ForStatement {
+  optional BindingPattern var_decl = 1;
+  optional Expression target = 2;
+  optional BlockStatement body = 3;
+}
+
 message MatchClause {
   optional Pattern pattern = 1;
   optional Statement statement = 2;
@@ -302,6 +312,7 @@ message Statement {
     AwaitStatement await_statement = 12;
     BreakStatement break_statement = 13;
     ContinueStatement continue_statement = 14;
+    ForStatement for_statement = 15;
   }
 }
 

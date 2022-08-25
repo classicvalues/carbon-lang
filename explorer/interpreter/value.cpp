@@ -340,7 +340,7 @@ void Value::Print(llvm::raw_ostream& out) const {
       out << "lval<" << cast<LValue>(*this).address() << ">";
       break;
     case Value::Kind::BoolType:
-      out << "Bool";
+      out << "bool";
       break;
     case Value::Kind::IntType:
       out << "i32";
@@ -937,7 +937,8 @@ auto ConstraintType::VisitEqualValues(
 
 auto ChoiceType::FindAlternative(std::string_view name) const
     -> std::optional<Nonnull<const Value*>> {
-  for (const NamedValue& alternative : alternatives_) {
+  std::vector<NamedValue> alternatives = declaration_->members();
+  for (const NamedValue& alternative : alternatives) {
     if (alternative.name == name) {
       return alternative.value;
     }

@@ -36,7 +36,7 @@ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
     -   [How do Carbon generics differ from templates?](#how-do-carbon-generics-differ-from-templates)
     -   [What is Carbon's memory model?](#what-is-carbons-memory-model)
     -   [How will Carbon achieve memory safety?](#how-will-carbon-achieve-memory-safety)
--   [How will the Carbon _project_ work?](#how-will-the-carbon-_project_-work)
+-   [How will the Carbon _project_ work?](#how-will-the-carbon-project-work)
     -   [Where does development occur?](#where-does-development-occur)
     -   [How does Carbon make decisions?](#how-does-carbon-make-decisions)
     -   [What happens when a decision was wrong?](#what-happens-when-a-decision-was-wrong)
@@ -174,7 +174,7 @@ For example, considering a pure C++ application:
 <a href="/docs/images/snippets.md#c">
 <!--
 Edit snippet in /docs/images/snippets.md and:
-https://drive.google.com/drive/folders/1-rsUjiya7dSZ87L8kpZmu3MZghRVxzLA
+https://drive.google.com/drive/folders/1QrBXiy_X74YsOueeC0IYlgyolWIhvusB
 -->
 <img src="/docs/images/cpp_snippet.svg" width="600"
      alt="A snippet of C++ code. Follow the link to read it.">
@@ -185,7 +185,7 @@ It's possible to migrate a single function to Carbon:
 <a href="/docs/images/snippets.md#mixed">
 <!--
 Edit snippet in /docs/images/snippets.md and:
-https://drive.google.com/drive/folders/1-rsUjiya7dSZ87L8kpZmu3MZghRVxzLA
+https://drive.google.com/drive/folders/1QrBXiy_X74YsOueeC0IYlgyolWIhvusB
 -->
 <img src="/docs/images/mixed_snippet.svg" width="600"
      alt="A snippet of mixed Carbon and C++ code. Follow the link to read it.">
@@ -537,7 +537,7 @@ ask (see
 
 ### How can I best say "I like X" or "I don't like X"?
 
-Both Discord and Github Discussions allow you to give an emoji "reaction" to
+Both Discord and GitHub Discussions allow you to give an emoji "reaction" to
 individual posts. If you'd like to amplify what has already been said, please
 use these instead of posting messages that re-state substantially the same
 thing. These make conversations easier to follow and understand general

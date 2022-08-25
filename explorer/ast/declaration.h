@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "common/check.h"
 #include "common/ostream.h"
 #include "explorer/ast/ast_node.h"
 #include "explorer/ast/impl_binding.h"
@@ -179,18 +180,24 @@ class SelfDeclaration : public Declaration {
   auto value_category() const -> ValueCategory { return ValueCategory::Let; }
 };
 
+enum class ClassExtensibility { None, Base, Abstract };
+
 class ClassDeclaration : public Declaration {
  public:
   using ImplementsCarbonValueNode = void;
 
   ClassDeclaration(SourceLocation source_loc, std::string name,
                    Nonnull<SelfDeclaration*> self_decl,
+                   ClassExtensibility extensibility,
                    std::optional<Nonnull<TuplePattern*>> type_params,
+                   std::optional<Nonnull<Expression*>> extends,
                    std::vector<Nonnull<Declaration*>> members)
       : Declaration(AstNodeKind::ClassDeclaration, source_loc),
         name_(std::move(name)),
+        extensibility_(extensibility),
         self_decl_(self_decl),
         type_params_(type_params),
+        extends_(extends),
         members_(std::move(members)) {}
 
   static auto classof(const AstNode* node) -> bool {
@@ -198,11 +205,15 @@ class ClassDeclaration : public Declaration {
   }
 
   auto name() const -> const std::string& { return name_; }
+  auto extensibility() const -> ClassExtensibility { return extensibility_; }
   auto type_params() const -> std::optional<Nonnull<const TuplePattern*>> {
     return type_params_;
   }
   auto type_params() -> std::optional<Nonnull<TuplePattern*>> {
     return type_params_;
+  }
+  auto extends() const -> std::optional<Nonnull<Expression*>> {
+    return extends_;
   }
   auto self() const -> Nonnull<const SelfDeclaration*> { return self_decl_; }
   auto self() -> Nonnull<SelfDeclaration*> { return self_decl_; }
@@ -215,8 +226,10 @@ class ClassDeclaration : public Declaration {
 
  private:
   std::string name_;
+  ClassExtensibility extensibility_;
   Nonnull<SelfDeclaration*> self_decl_;
   std::optional<Nonnull<TuplePattern*>> type_params_;
+  std::optional<Nonnull<Expression*>> extends_;
   std::vector<Nonnull<Declaration*>> members_;
 };
 
@@ -249,9 +262,11 @@ class ChoiceDeclaration : public Declaration {
   using ImplementsCarbonValueNode = void;
 
   ChoiceDeclaration(SourceLocation source_loc, std::string name,
+                    std::optional<Nonnull<TuplePattern*>> type_params,
                     std::vector<Nonnull<AlternativeSignature*>> alternatives)
       : Declaration(AstNodeKind::ChoiceDeclaration, source_loc),
         name_(std::move(name)),
+        type_params_(type_params),
         alternatives_(std::move(alternatives)) {}
 
   static auto classof(const AstNode* node) -> bool {
@@ -259,6 +274,14 @@ class ChoiceDeclaration : public Declaration {
   }
 
   auto name() const -> const std::string& { return name_; }
+
+  auto type_params() const -> std::optional<Nonnull<const TuplePattern*>> {
+    return type_params_;
+  }
+  auto type_params() -> std::optional<Nonnull<TuplePattern*>> {
+    return type_params_;
+  }
+
   auto alternatives() const
       -> llvm::ArrayRef<Nonnull<const AlternativeSignature*>> {
     return alternatives_;
@@ -267,11 +290,18 @@ class ChoiceDeclaration : public Declaration {
     return alternatives_;
   }
 
+  void set_members(const std::vector<NamedValue>& members) {
+    members_ = members;
+  }
+  auto members() const -> std::vector<NamedValue> { return members_; }
+
   auto value_category() const -> ValueCategory { return ValueCategory::Let; }
 
  private:
   std::string name_;
+  std::optional<Nonnull<TuplePattern*>> type_params_;
   std::vector<Nonnull<AlternativeSignature*>> alternatives_;
+  std::vector<NamedValue> members_;
 };
 
 // Global variable definition implements the Declaration concept.

@@ -149,6 +149,18 @@ static auto OperatorToCarbon(const Fuzzing::OperatorExpression& operator_expr,
     case Fuzzing::OperatorExpression::Eq:
       BinaryOperatorToCarbon(arg0, " == ", arg1, out);
       break;
+    case Fuzzing::OperatorExpression::Less:
+      BinaryOperatorToCarbon(arg0, " < ", arg1, out);
+      break;
+    case Fuzzing::OperatorExpression::LessEq:
+      BinaryOperatorToCarbon(arg0, " <= ", arg1, out);
+      break;
+    case Fuzzing::OperatorExpression::GreaterEq:
+      BinaryOperatorToCarbon(arg0, " >= ", arg1, out);
+      break;
+    case Fuzzing::OperatorExpression::Greater:
+      BinaryOperatorToCarbon(arg0, " > ", arg1, out);
+      break;
 
     case Fuzzing::OperatorExpression::Or:
       BinaryOperatorToCarbon(arg0, " or ", arg1, out);
@@ -321,7 +333,7 @@ static auto ExpressionToCarbon(const Fuzzing::Expression& expression,
     }
 
     case Fuzzing::Expression::kBoolTypeLiteral:
-      out << "Bool";
+      out << "bool";
       break;
 
     case Fuzzing::Expression::kBoolLiteral: {
@@ -572,6 +584,16 @@ static auto StatementToCarbon(const Fuzzing::Statement& statement,
       ExpressionToCarbon(while_statement.condition(), out);
       out << ") ";
       BlockStatementToCarbon(while_statement.body(), out);
+      break;
+    }
+    case Fuzzing::Statement::kForStatement: {
+      const auto& for_statement = statement.for_statement();
+      out << "for (";
+      BindingPatternToCarbon(for_statement.var_decl(), out);
+      out << " in ";
+      ExpressionToCarbon(for_statement.target(), out);
+      out << ") ";
+      BlockStatementToCarbon(for_statement.body(), out);
       break;
     }
 

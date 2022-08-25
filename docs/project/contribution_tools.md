@@ -61,7 +61,7 @@ typical tool setup flow is:
         create a GitHub fork and clone the repository locally
     -   `cd carbon-lang` to go into the cloned fork's directory.
     -   `pre-commit install` to set up [pre-commit](#pre-commit) in the clone.
-4.  Validate your installation by invoking `bazel test //...:all' from the
+4.  Validate your installation by invoking `bazel test //...:all` from the
     project root. All tests should pass.
 
 <!-- google-doc-style-resume -->
@@ -153,7 +153,7 @@ export PATH="$(brew --prefix llvm)/bin:${PATH}"
 Carbon expects the `PATH` to include the installed tooling. If set, `CC` should
 also point at `clang`. Our build environment will detect the `clang` binary
 using `CC` then `PATH`, and will expect the rest of the LLVM toolchain to be
-available in the same directory as `clang`. However, various scripts and tools
+available in the same directory as `llvm-ar`. However, various scripts and tools
 assume that the LLVM toolchain will be in `PATH`, particularly for tools like
 `clang-format` and `clang-tidy`.
 
