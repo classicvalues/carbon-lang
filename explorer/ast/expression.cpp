@@ -181,6 +181,11 @@ void Expression::Print(llvm::raw_ostream& out) const {
       out << access.object() << ".(" << access.path() << ")";
       break;
     }
+    case ExpressionKind::BaseAccessExpression: {
+      const auto& access = cast<BaseAccessExpression>(*this);
+      out << access.object() << ".base";
+      break;
+    }
     case ExpressionKind::TupleLiteral: {
       out << "(";
       llvm::ListSeparator sep;
@@ -257,6 +262,12 @@ void Expression::Print(llvm::raw_ostream& out) const {
       }
       break;
     }
+    case ExpressionKind::BuiltinConvertExpression: {
+      // These don't represent source syntax, so just print the original
+      // expression.
+      out << *cast<BuiltinConvertExpression>(this)->source_expression();
+      break;
+    }
     case ExpressionKind::UnimplementedExpression: {
       const auto& unimplemented = cast<UnimplementedExpression>(*this);
       out << "UnimplementedExpression<" << unimplemented.label() << ">(";
@@ -318,7 +329,7 @@ void Expression::PrintID(llvm::raw_ostream& out) const {
       out << "String";
       break;
     case ExpressionKind::TypeTypeLiteral:
-      out << "Type";
+      out << "type";
       break;
     case ExpressionKind::ContinuationTypeLiteral:
       out << "Continuation";
@@ -330,8 +341,10 @@ void Expression::PrintID(llvm::raw_ostream& out) const {
     case ExpressionKind::IndexExpression:
     case ExpressionKind::SimpleMemberAccessExpression:
     case ExpressionKind::CompoundMemberAccessExpression:
+    case ExpressionKind::BaseAccessExpression:
     case ExpressionKind::IfExpression:
     case ExpressionKind::WhereExpression:
+    case ExpressionKind::BuiltinConvertExpression:
     case ExpressionKind::TupleLiteral:
     case ExpressionKind::StructLiteral:
     case ExpressionKind::StructTypeLiteral:
@@ -351,17 +364,17 @@ WhereClause::~WhereClause() = default;
 void WhereClause::Print(llvm::raw_ostream& out) const {
   switch (kind()) {
     case WhereClauseKind::IsWhereClause: {
-      auto& clause = cast<IsWhereClause>(*this);
+      const auto& clause = cast<IsWhereClause>(*this);
       out << clause.type() << " is " << clause.constraint();
       break;
     }
     case WhereClauseKind::EqualsWhereClause: {
-      auto& clause = cast<EqualsWhereClause>(*this);
+      const auto& clause = cast<EqualsWhereClause>(*this);
       out << clause.lhs() << " == " << clause.rhs();
       break;
     }
     case WhereClauseKind::RewriteWhereClause: {
-      auto& clause = cast<RewriteWhereClause>(*this);
+      const auto& clause = cast<RewriteWhereClause>(*this);
       out << "." << clause.member_name() << " = " << clause.replacement();
       break;
     }

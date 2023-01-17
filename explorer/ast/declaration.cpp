@@ -15,8 +15,9 @@ Declaration::~Declaration() = default;
 
 void Declaration::Print(llvm::raw_ostream& out) const {
   switch (kind()) {
-    case DeclarationKind::InterfaceDeclaration: {
-      const auto& iface_decl = cast<InterfaceDeclaration>(*this);
+    case DeclarationKind::InterfaceDeclaration:
+    case DeclarationKind::ConstraintDeclaration: {
+      const auto& iface_decl = cast<ConstraintTypeDeclaration>(*this);
       PrintID(out);
       out << " {\n";
       for (Nonnull<Declaration*> m : iface_decl.members()) {
@@ -30,6 +31,16 @@ void Declaration::Print(llvm::raw_ostream& out) const {
       PrintID(out);
       out << " {\n";
       for (Nonnull<Declaration*> m : impl_decl.members()) {
+        out << *m;
+      }
+      out << "}\n";
+      break;
+    }
+    case DeclarationKind::MatchFirstDeclaration: {
+      const auto& match_first_decl = cast<MatchFirstDeclaration>(*this);
+      PrintID(out);
+      out << " {\n";
+      for (Nonnull<const ImplDeclaration*> m : match_first_decl.impls()) {
         out << *m;
       }
       out << "}\n";
@@ -120,6 +131,11 @@ void Declaration::PrintID(llvm::raw_ostream& out) const {
       out << "interface " << iface_decl.name();
       break;
     }
+    case DeclarationKind::ConstraintDeclaration: {
+      const auto& constraint_decl = cast<ConstraintDeclaration>(*this);
+      out << "constraint " << constraint_decl.name();
+      break;
+    }
     case DeclarationKind::ImplDeclaration: {
       const auto& impl_decl = cast<ImplDeclaration>(*this);
       switch (impl_decl.kind()) {
@@ -133,6 +149,9 @@ void Declaration::PrintID(llvm::raw_ostream& out) const {
           << impl_decl.interface();
       break;
     }
+    case DeclarationKind::MatchFirstDeclaration:
+      out << "match_first";
+      break;
     case DeclarationKind::FunctionDeclaration:
       out << "fn " << cast<FunctionDeclaration>(*this).name();
       break;
@@ -217,7 +236,8 @@ auto GetName(const Declaration& declaration)
     case DeclarationKind::ChoiceDeclaration:
       return cast<ChoiceDeclaration>(declaration).name();
     case DeclarationKind::InterfaceDeclaration:
-      return cast<InterfaceDeclaration>(declaration).name();
+    case DeclarationKind::ConstraintDeclaration:
+      return cast<ConstraintTypeDeclaration>(declaration).name();
     case DeclarationKind::VariableDeclaration:
       return cast<VariableDeclaration>(declaration).binding().name();
     case DeclarationKind::AssociatedConstantDeclaration:
@@ -225,9 +245,10 @@ auto GetName(const Declaration& declaration)
     case DeclarationKind::InterfaceExtendsDeclaration:
     case DeclarationKind::InterfaceImplDeclaration:
     case DeclarationKind::ImplDeclaration:
+    case DeclarationKind::MatchFirstDeclaration:
       return std::nullopt;
     case DeclarationKind::SelfDeclaration:
-      return cast<SelfDeclaration>(declaration).name();
+      return SelfDeclaration::name();
     case DeclarationKind::AliasDeclaration: {
       return cast<AliasDeclaration>(declaration).name();
     }
@@ -258,14 +279,14 @@ namespace {
 
 // The deduced parameters of a function declaration.
 struct DeducedParameters {
-  // The `me` parameter, if any.
-  std::optional<Nonnull<Pattern*>> me_pattern;
+  // The `self` parameter, if any.
+  std::optional<Nonnull<Pattern*>> self_pattern;
 
   // All other deduced parameters.
   std::vector<Nonnull<GenericBinding*>> resolved_params;
 };
 
-// Split the `me` pattern (if any) out of `deduced_params`.
+// Split the `self` pattern (if any) out of `deduced_params`.
 auto SplitDeducedParameters(
     SourceLocation source_loc,
     const std::vector<Nonnull<AstNode*>>& deduced_params)
@@ -278,32 +299,32 @@ auto SplitDeducedParameters(
         break;
       case AstNodeKind::BindingPattern: {
         Nonnull<BindingPattern*> binding = &cast<BindingPattern>(*param);
-        if (binding->name() != "me") {
+        if (binding->name() != "self") {
           return ProgramError(source_loc)
                  << "illegal binding pattern in implicit parameter list";
         }
-        if (result.me_pattern.has_value()) {
+        if (result.self_pattern.has_value()) {
           return ProgramError(source_loc)
-                 << "parameter list cannot contain more than one `me` "
+                 << "parameter list cannot contain more than one `self` "
                     "parameter";
         }
-        result.me_pattern = binding;
+        result.self_pattern = binding;
         break;
       }
       case AstNodeKind::AddrPattern: {
         Nonnull<AddrPattern*> addr_pattern = &cast<AddrPattern>(*param);
         Nonnull<BindingPattern*> binding =
             &cast<BindingPattern>(addr_pattern->binding());
-        if (binding->name() != "me") {
+        if (binding->name() != "self") {
           return ProgramError(source_loc)
                  << "illegal binding pattern in implicit parameter list";
         }
-        if (result.me_pattern.has_value()) {
+        if (result.self_pattern.has_value()) {
           return ProgramError(source_loc)
-                 << "parameter list cannot contain more than one `me` "
+                 << "parameter list cannot contain more than one `self` "
                     "parameter";
         }
-        result.me_pattern = addr_pattern;
+        result.self_pattern = addr_pattern;
         break;
       }
       default:
@@ -326,7 +347,7 @@ auto DestructorDeclaration::CreateDestructor(
                           SplitDeducedParameters(source_loc, deduced_params));
   return arena->New<DestructorDeclaration>(
       source_loc, std::move(split_params.resolved_params),
-      split_params.me_pattern, param_pattern, return_term, body);
+      split_params.self_pattern, param_pattern, return_term, body);
 }
 
 auto FunctionDeclaration::Create(Nonnull<Arena*> arena,
@@ -334,14 +355,16 @@ auto FunctionDeclaration::Create(Nonnull<Arena*> arena,
                                  std::vector<Nonnull<AstNode*>> deduced_params,
                                  Nonnull<TuplePattern*> param_pattern,
                                  ReturnTerm return_term,
-                                 std::optional<Nonnull<Block*>> body)
+                                 std::optional<Nonnull<Block*>> body,
+                                 VirtualOverride virt_override)
     -> ErrorOr<Nonnull<FunctionDeclaration*>> {
   DeducedParameters split_params;
   CARBON_ASSIGN_OR_RETURN(split_params,
                           SplitDeducedParameters(source_loc, deduced_params));
   return arena->New<FunctionDeclaration>(
       source_loc, name, std::move(split_params.resolved_params),
-      split_params.me_pattern, param_pattern, return_term, body);
+      split_params.self_pattern, param_pattern, return_term, body,
+      virt_override);
 }
 
 void CallableDeclaration::PrintDepth(int depth, llvm::raw_ostream& out) const {

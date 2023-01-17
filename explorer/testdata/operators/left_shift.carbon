@@ -11,8 +11,8 @@ package ExplorerTest api;
 
 class A { var n: i32; }
 
-external impl A as LeftShiftWith(i32) where .Result == A {
-  fn Op[me: Self](rhs: i32) -> A { return {.n = me.n << rhs}; }
+external impl A as LeftShiftWith(i32) where .Result = A {
+  fn Op[self: Self](rhs: i32) -> A { return {.n = self.n << rhs}; }
 }
 
 fn Main() -> i32 {

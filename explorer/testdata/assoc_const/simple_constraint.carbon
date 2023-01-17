@@ -10,17 +10,17 @@
 package ExplorerTest api;
 
 interface Frob {
-  let Result:! Type;
-  fn F[me: Self]() -> Result;
+  let Result:! type;
+  fn F[self: Self]() -> Result;
 }
 
-fn Use[T:! Frob where .Result == .Self](x: T) -> T {
+fn Use[T:! Frob where .Result = .Self](x: T) -> T {
   var v: T = x.F();
   return v;
 }
 
-impl i32 as Frob where .Result == i32 {
-  fn F[me: Self]() -> i32 { return me + 1; }
+impl i32 as Frob where .Result = i32 {
+  fn F[self: Self]() -> i32 { return self + 1; }
 }
 
 fn Main() -> i32 {

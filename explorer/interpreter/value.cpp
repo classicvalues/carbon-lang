@@ -5,11 +5,17 @@
 #include "explorer/interpreter/value.h"
 
 #include <algorithm>
+#include <optional>
+#include <string_view>
 
 #include "common/check.h"
+#include "common/error.h"
+#include "explorer/ast/declaration.h"
+#include "explorer/ast/element.h"
 #include "explorer/common/arena.h"
 #include "explorer/common/error_builders.h"
 #include "explorer/interpreter/action.h"
+#include "explorer/interpreter/element_path.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/Casting.h"
@@ -32,18 +38,73 @@ auto StructValue::FindField(std::string_view name) const
   return std::nullopt;
 }
 
-static auto GetMember(Nonnull<Arena*> arena, Nonnull<const Value*> v,
-                      const FieldPath::Component& field,
-                      SourceLocation source_loc, Nonnull<const Value*> me_value)
-    -> ErrorOr<Nonnull<const Value*>> {
-  std::string_view f = field.name();
+NominalClassValue::NominalClassValue(
+    Nonnull<const Value*> type, Nonnull<const Value*> inits,
+    std::optional<Nonnull<const NominalClassValue*>> base,
+    Nonnull<const NominalClassValue** const> class_value_ptr)
+    : Value(Kind::NominalClassValue),
+      type_(type),
+      inits_(inits),
+      base_(base),
+      class_value_ptr_(class_value_ptr) {
+  // Update ancestors's class value to point to latest child.
+  *class_value_ptr_ = this;
+}
 
+static auto FindClassField(Nonnull<const NominalClassValue*> object,
+                           std::string_view name)
+    -> std::optional<Nonnull<const Value*>> {
+  if (auto field = cast<StructValue>(object->inits()).FindField(name)) {
+    return field;
+  }
+  if (object->base().has_value()) {
+    return FindClassField(object->base().value(), name);
+  }
+  return std::nullopt;
+}
+
+static auto GetBaseElement(Nonnull<const NominalClassValue*> class_value,
+                           SourceLocation source_loc)
+    -> ErrorOr<Nonnull<const Value*>> {
+  const auto base = cast<NominalClassValue>(class_value)->base();
+  if (!base.has_value()) {
+    return ProgramError(source_loc)
+           << "Non-existent base class for " << *class_value;
+  }
+  return base.value();
+}
+
+static auto GetPositionalElement(Nonnull<const TupleValue*> tuple,
+                                 const ElementPath::Component& path_comp,
+                                 SourceLocation source_loc)
+    -> ErrorOr<Nonnull<const Value*>> {
+  CARBON_CHECK(path_comp.element()->kind() == ElementKind::PositionalElement)
+      << "Invalid non-tuple member";
+  const auto* tuple_element = cast<PositionalElement>(path_comp.element());
+  const size_t index = tuple_element->index();
+  if (index < 0 || index >= tuple->elements().size()) {
+    return ProgramError(source_loc)
+           << "index " << index << " out of range for " << *tuple;
+  }
+  return tuple->elements()[index];
+}
+
+static auto GetNamedElement(Nonnull<Arena*> arena, Nonnull<const Value*> v,
+                            const ElementPath::Component& field,
+                            SourceLocation source_loc,
+                            Nonnull<const Value*> me_value)
+    -> ErrorOr<Nonnull<const Value*>> {
+  CARBON_CHECK(field.element()->kind() == ElementKind::NamedElement)
+      << "Invalid element, expecting NamedElement";
+  const auto* member = cast<NamedElement>(field.element());
+  const auto f = member->name();
   if (field.witness().has_value()) {
-    Nonnull<const Witness*> witness = cast<Witness>(*field.witness());
+    const auto* witness = cast<Witness>(*field.witness());
 
     // Associated constants.
-    if (auto* assoc_const = dyn_cast_or_null<AssociatedConstantDeclaration>(
-            field.member().declaration().value_or(nullptr))) {
+    if (const auto* assoc_const =
+            dyn_cast_or_null<AssociatedConstantDeclaration>(
+                member->declaration().value_or(nullptr))) {
       CARBON_CHECK(field.interface()) << "have witness but no interface";
       // TODO: Use witness to find the value of the constant.
       return arena->New<AssociatedConstant>(v, *field.interface(), assoc_const,
@@ -51,17 +112,17 @@ static auto GetMember(Nonnull<Arena*> arena, Nonnull<const Value*> v,
     }
 
     // Associated functions.
-    if (auto* impl_witness = dyn_cast<ImplWitness>(witness)) {
+    if (const auto* impl_witness = dyn_cast<ImplWitness>(witness)) {
       if (std::optional<Nonnull<const Declaration*>> mem_decl =
               FindMember(f, impl_witness->declaration().members());
           mem_decl.has_value()) {
         const auto& fun_decl = cast<FunctionDeclaration>(**mem_decl);
         if (fun_decl.is_method()) {
-          return arena->New<BoundMethodValue>(&fun_decl, v,
+          return arena->New<BoundMethodValue>(&fun_decl, me_value,
                                               &impl_witness->bindings());
         } else {
           // Class function.
-          auto* fun = cast<FunctionValue>(*fun_decl.constant_value());
+          const auto* fun = cast<FunctionValue>(*fun_decl.constant_value());
           return arena->New<FunctionValue>(&fun->declaration(),
                                            &impl_witness->bindings());
         }
@@ -86,27 +147,44 @@ static auto GetMember(Nonnull<Arena*> arena, Nonnull<const Value*> v,
     case Value::Kind::NominalClassValue: {
       const auto& object = cast<NominalClassValue>(*v);
       // Look for a field.
-      // Note that the value representation of an empty class is a
-      // `StructType`, not a `StructValue`.
-      std::optional<Nonnull<const Value*>> field;
-      if (auto* struct_value = dyn_cast<StructValue>(&object.inits())) {
-        field = struct_value->FindField(f);
-      }
-      if (field.has_value()) {
+      if (std::optional<Nonnull<const Value*>> field =
+              FindClassField(&object, f)) {
         return *field;
       } else {
         // Look for a method in the object's class
         const auto& class_type = cast<NominalClassType>(object.type());
         std::optional<Nonnull<const FunctionValue*>> func =
-            class_type.FindFunction(f);
+            FindFunctionWithParents(f, class_type.declaration());
         if (!func) {
           return ProgramError(source_loc) << "member " << f << " not in " << *v
                                           << " or its " << class_type;
         } else if ((*func)->declaration().is_method()) {
           // Found a method. Turn it into a bound method.
-          const FunctionValue& m = cast<FunctionValue>(**func);
-          return arena->New<BoundMethodValue>(&m.declaration(), me_value,
-                                              &class_type.bindings());
+          const auto& m = cast<FunctionValue>(**func);
+          if (m.declaration().virt_override() == VirtualOverride::None) {
+            return arena->New<BoundMethodValue>(&m.declaration(), me_value,
+                                                &class_type.bindings());
+          }
+          // Method is virtual, get child-most class value and perform vtable
+          // lookup.
+          const auto& last_child_value = **object.class_value_ptr();
+          const auto& last_child_type =
+              cast<NominalClassType>(last_child_value.type());
+          const auto res = last_child_type.vtable().find(f);
+          CARBON_CHECK(res != last_child_type.vtable().end());
+          const auto [virtual_method, level] = res->second;
+          const auto level_diff = last_child_type.hierarchy_level() - level;
+          const auto* m_class_value = &last_child_value;
+          // Get class value matching the virtual method, and turn it into a
+          // bound method.
+          for (int i = 0; i < level_diff; ++i) {
+            CARBON_CHECK(m_class_value->base())
+                << "Error trying to access function class value";
+            m_class_value = *m_class_value->base();
+          }
+          return arena->New<BoundMethodValue>(
+              cast<FunctionDeclaration>(virtual_method), m_class_value,
+              &class_type.bindings());
         } else {
           // Found a class function
           // TODO: This should not be reachable.
@@ -125,9 +203,9 @@ static auto GetMember(Nonnull<Arena*> arena, Nonnull<const Value*> v,
     }
     case Value::Kind::NominalClassType: {
       // Access a class function.
-      const NominalClassType& class_type = cast<NominalClassType>(*v);
+      const auto& class_type = cast<NominalClassType>(*v);
       std::optional<Nonnull<const FunctionValue*>> fun =
-          class_type.FindFunction(f);
+          FindFunctionWithParents(f, class_type.declaration());
       if (fun == std::nullopt) {
         return ProgramError(source_loc)
                << "class function " << f << " not in " << *v;
@@ -136,26 +214,56 @@ static auto GetMember(Nonnull<Arena*> arena, Nonnull<const Value*> v,
                                        &class_type.bindings());
     }
     default:
-      CARBON_FATAL() << "field access not allowed for value " << *v;
+      CARBON_FATAL() << "named element access not supported for value " << *v;
   }
 }
 
-auto Value::GetMember(Nonnull<Arena*> arena, const FieldPath& path,
-                      SourceLocation source_loc,
-                      Nonnull<const Value*> me_value) const
+static auto GetElement(Nonnull<Arena*> arena, Nonnull<const Value*> v,
+                       const ElementPath::Component& path_comp,
+                       SourceLocation source_loc,
+                       Nonnull<const Value*> me_value)
+    -> ErrorOr<Nonnull<const Value*>> {
+  switch (path_comp.element()->kind()) {
+    case ElementKind::NamedElement:
+      return GetNamedElement(arena, v, path_comp, source_loc, me_value);
+    case ElementKind::PositionalElement: {
+      if (const auto* tuple = dyn_cast<TupleValue>(v)) {
+        return GetPositionalElement(tuple, path_comp, source_loc);
+      } else {
+        CARBON_FATAL() << "Invalid value for positional element";
+      }
+    }
+    case ElementKind::BaseElement:
+      switch (v->kind()) {
+        case Value::Kind::NominalClassValue:
+          return GetBaseElement(cast<NominalClassValue>(v), source_loc);
+        case Value::Kind::PointerValue: {
+          const auto* ptr = cast<PointerValue>(v);
+          return arena->New<PointerValue>(
+              ptr->address().ElementAddress(path_comp.element()));
+        }
+        default:
+          CARBON_FATAL() << "Invalid value for base element";
+      }
+  }
+}
+
+auto Value::GetElement(Nonnull<Arena*> arena, const ElementPath& path,
+                       SourceLocation source_loc,
+                       Nonnull<const Value*> me_value) const
     -> ErrorOr<Nonnull<const Value*>> {
   Nonnull<const Value*> value(this);
-  for (const FieldPath::Component& field : path.components_) {
+  for (const ElementPath::Component& field : path.components_) {
     CARBON_ASSIGN_OR_RETURN(
-        value, Carbon::GetMember(arena, value, field, source_loc, me_value));
+        value, Carbon::GetElement(arena, value, field, source_loc, me_value));
   }
   return value;
 }
 
 static auto SetFieldImpl(
     Nonnull<Arena*> arena, Nonnull<const Value*> value,
-    std::vector<FieldPath::Component>::const_iterator path_begin,
-    std::vector<FieldPath::Component>::const_iterator path_end,
+    std::vector<ElementPath::Component>::const_iterator path_begin,
+    std::vector<ElementPath::Component>::const_iterator path_end,
     Nonnull<const Value*> field_value, SourceLocation source_loc)
     -> ErrorOr<Nonnull<const Value*>> {
   if (path_begin == path_end) {
@@ -166,11 +274,11 @@ static auto SetFieldImpl(
       std::vector<NamedValue> elements = cast<StructValue>(*value).elements();
       auto it =
           llvm::find_if(elements, [path_begin](const NamedValue& element) {
-            return element.name == (*path_begin).name();
+            return (*path_begin).IsNamed(element.name);
           });
       if (it == elements.end()) {
         return ProgramError(source_loc)
-               << "field " << (*path_begin).name() << " not in " << *value;
+               << "field " << *path_begin << " not in " << *value;
       }
       CARBON_ASSIGN_OR_RETURN(
           it->value, SetFieldImpl(arena, it->value, path_begin + 1, path_end,
@@ -178,36 +286,57 @@ static auto SetFieldImpl(
       return arena->New<StructValue>(elements);
     }
     case Value::Kind::NominalClassValue: {
-      const NominalClassValue& object = cast<NominalClassValue>(*value);
-      CARBON_ASSIGN_OR_RETURN(Nonnull<const Value*> inits,
-                              SetFieldImpl(arena, &object.inits(), path_begin,
-                                           path_end, field_value, source_loc));
-      return arena->New<NominalClassValue>(&object.type(), inits);
+      const auto& object = cast<NominalClassValue>(*value);
+      if (auto inits = SetFieldImpl(arena, &object.inits(), path_begin,
+                                    path_end, field_value, source_loc);
+          inits.ok()) {
+        return arena->New<NominalClassValue>(
+            &object.type(), *inits, object.base(), object.class_value_ptr());
+      } else if (object.base().has_value()) {
+        auto new_base = SetFieldImpl(arena, object.base().value(), path_begin,
+                                     path_end, field_value, source_loc);
+        if (new_base.ok()) {
+          return arena->New<NominalClassValue>(
+              &object.type(), &object.inits(),
+              cast<NominalClassValue>(*new_base), object.class_value_ptr());
+        }
+      }
+      // Failed to match, show full object content
+      return ProgramError(source_loc)
+             << "field " << *path_begin << " not in " << *value;
     }
+    case Value::Kind::TupleType:
     case Value::Kind::TupleValue: {
+      CARBON_CHECK((*path_begin).element()->kind() ==
+                   ElementKind::PositionalElement)
+          << "Invalid non-positional member for tuple";
       std::vector<Nonnull<const Value*>> elements =
-          cast<TupleValue>(*value).elements();
-      // TODO(geoffromer): update FieldPath to hold integers as well as strings.
-      int index = std::stoi(std::string((*path_begin).name()));
-      if (index < 0 || static_cast<size_t>(index) >= elements.size()) {
-        return ProgramError(source_loc) << "index " << (*path_begin).name()
-                                        << " out of range in " << *value;
+          cast<TupleValueBase>(*value).elements();
+      const size_t index =
+          cast<PositionalElement>((*path_begin).element())->index();
+      if (index < 0 || index >= elements.size()) {
+        return ProgramError(source_loc)
+               << "index " << index << " out of range in " << *value;
       }
       CARBON_ASSIGN_OR_RETURN(
           elements[index], SetFieldImpl(arena, elements[index], path_begin + 1,
                                         path_end, field_value, source_loc));
-      return arena->New<TupleValue>(elements);
+      if (isa<TupleType>(value)) {
+        return arena->New<TupleType>(elements);
+      } else {
+        return arena->New<TupleValue>(elements);
+      }
     }
     default:
       CARBON_FATAL() << "field access not allowed for value " << *value;
   }
 }
 
-auto Value::SetField(Nonnull<Arena*> arena, const FieldPath& path,
+auto Value::SetField(Nonnull<Arena*> arena, const ElementPath& path,
                      Nonnull<const Value*> field_value,
                      SourceLocation source_loc) const
     -> ErrorOr<Nonnull<const Value*>> {
-  return SetFieldImpl(arena, Nonnull<const Value*>(this),
+  return SetFieldImpl(arena, static_cast<Nonnull<const Value*>>(this),
                       path.components_.begin(), path.components_.end(),
                       field_value, source_loc);
 }
@@ -269,12 +398,17 @@ void Value::Print(llvm::raw_ostream& out) const {
     case Value::Kind::NominalClassValue: {
       const auto& s = cast<NominalClassValue>(*this);
       out << cast<NominalClassType>(s.type()).declaration().name() << s.inits();
+      if (s.base().has_value()) {
+        out << " base " << *s.base().value();
+      }
       break;
     }
+    case Value::Kind::TupleType:
     case Value::Kind::TupleValue: {
       out << "(";
       llvm::ListSeparator sep;
-      for (Nonnull<const Value*> element : cast<TupleValue>(*this).elements()) {
+      for (Nonnull<const Value*> element :
+           cast<TupleValueBase>(*this).elements()) {
         out << sep << *element;
       }
       out << ")";
@@ -287,14 +421,14 @@ void Value::Print(llvm::raw_ostream& out) const {
       out << (cast<BoolValue>(*this).value() ? "true" : "false");
       break;
     case Value::Kind::DestructorValue: {
-      const DestructorValue& destructor = cast<DestructorValue>(*this);
+      const auto& destructor = cast<DestructorValue>(*this);
       out << "destructor [ ";
-      out << destructor.declaration().me_pattern();
+      out << destructor.declaration().self_pattern();
       out << " ]";
       break;
     }
     case Value::Kind::FunctionValue: {
-      const FunctionValue& fun = cast<FunctionValue>(*this);
+      const auto& fun = cast<FunctionValue>(*this);
       out << "fun<" << fun.declaration().name() << ">";
       if (!fun.type_args().empty()) {
         out << "[";
@@ -315,7 +449,7 @@ void Value::Print(llvm::raw_ostream& out) const {
       break;
     }
     case Value::Kind::BoundMethodValue: {
-      const BoundMethodValue& method = cast<BoundMethodValue>(*this);
+      const auto& method = cast<BoundMethodValue>(*this);
       out << "bound_method<" << method.declaration().name() << ">";
       if (!method.type_args().empty()) {
         out << "[";
@@ -348,7 +482,7 @@ void Value::Print(llvm::raw_ostream& out) const {
       out << "i32";
       break;
     case Value::Kind::TypeType:
-      out << "Type";
+      out << "type";
       break;
     case Value::Kind::AutoType:
       out << "auto";
@@ -357,7 +491,7 @@ void Value::Print(llvm::raw_ostream& out) const {
       out << "Continuation";
       break;
     case Value::Kind::PointerType:
-      out << cast<PointerType>(*this).type() << "*";
+      out << cast<PointerType>(*this).pointee_type() << "*";
       break;
     case Value::Kind::FunctionType: {
       const auto& fn_type = cast<FunctionType>(*this);
@@ -419,34 +553,43 @@ void Value::Print(llvm::raw_ostream& out) const {
     case Value::Kind::InterfaceType: {
       const auto& iface_type = cast<InterfaceType>(*this);
       out << "interface ";
-      PrintNameWithBindings(out, &iface_type.declaration(), iface_type.args());
+      PrintNameWithBindings(out, &iface_type.declaration(),
+                            iface_type.bindings().args());
+      break;
+    }
+    case Value::Kind::NamedConstraintType: {
+      const auto& constraint_type = cast<NamedConstraintType>(*this);
+      out << "constraint ";
+      PrintNameWithBindings(out, &constraint_type.declaration(),
+                            constraint_type.bindings().args());
       break;
     }
     case Value::Kind::ConstraintType: {
       const auto& constraint = cast<ConstraintType>(*this);
-      out << "constraint ";
       llvm::ListSeparator combine(" & ");
-      for (const ConstraintType::LookupContext& ctx :
-           constraint.lookup_contexts()) {
+      for (const LookupContext& ctx : constraint.lookup_contexts()) {
         out << combine << *ctx.context;
+      }
+      if (constraint.lookup_contexts().empty()) {
+        out << "type";
       }
       out << " where ";
       llvm::ListSeparator sep(" and ");
-      for (const ConstraintType::RewriteConstraint& rewrite :
+      for (const RewriteConstraint& rewrite :
            constraint.rewrite_constraints()) {
-        out << sep << ".(" << *rewrite.interface << "."
-            << *GetName(*rewrite.constant)
-            << ") = " << rewrite.replacement->value();
+        out << sep << ".(";
+        PrintNameWithBindings(out, &rewrite.constant->interface().declaration(),
+                              rewrite.constant->interface().args());
+        out << "." << *GetName(rewrite.constant->constant())
+            << ") = " << *rewrite.unconverted_replacement;
       }
-      for (const ConstraintType::ImplConstraint& impl :
-           constraint.impl_constraints()) {
+      for (const ImplConstraint& impl : constraint.impl_constraints()) {
         // TODO: Skip cases where `impl.type` is `.Self` and the interface is
         // in `lookup_contexts()`.
         out << sep << *impl.type << " is " << *impl.interface;
       }
-      for (const ConstraintType::EqualityConstraint& equality :
+      for (const EqualityConstraint& equality :
            constraint.equality_constraints()) {
-        // TODO: Skip cases matching something in `rewrite_constraints()`.
         out << sep;
         llvm::ListSeparator equal(" == ");
         for (Nonnull<const Value*> value : equality.values) {
@@ -470,7 +613,7 @@ void Value::Print(llvm::raw_ostream& out) const {
       const auto& witness = cast<ConstraintWitness>(*this);
       out << "(";
       llvm::ListSeparator sep;
-      for (auto* elem : witness.witnesses()) {
+      for (const auto* elem : witness.witnesses()) {
         out << sep << *elem;
       }
       out << ")";
@@ -497,7 +640,7 @@ void Value::Print(llvm::raw_ostream& out) const {
       if (member_name.interface().has_value()) {
         out << *member_name.interface().value();
       }
-      out << "." << member_name.name();
+      out << "." << member_name;
       if (member_name.base_type().has_value() &&
           member_name.interface().has_value()) {
         out << ")";
@@ -512,7 +655,10 @@ void Value::Print(llvm::raw_ostream& out) const {
       break;
     case Value::Kind::AssociatedConstant: {
       const auto& assoc = cast<AssociatedConstant>(*this);
-      out << "(" << assoc.base() << ")." << assoc.constant().binding().name();
+      out << "(" << assoc.base() << ").(";
+      PrintNameWithBindings(out, &assoc.interface().declaration(),
+                            assoc.interface().args());
+      out << "." << *GetName(assoc.constant()) << ")";
       break;
     }
     case Value::Kind::ContinuationValue: {
@@ -527,9 +673,6 @@ void Value::Print(llvm::raw_ostream& out) const {
       out.write_escaped(cast<StringValue>(*this).value());
       out << "\"";
       break;
-    case Value::Kind::TypeOfClassType:
-      out << "typeof(" << cast<TypeOfClassType>(*this).class_type() << ")";
-      break;
     case Value::Kind::TypeOfMixinPseudoType:
       out << "typeof("
           << cast<TypeOfMixinPseudoType>(*this)
@@ -538,28 +681,12 @@ void Value::Print(llvm::raw_ostream& out) const {
                  .name()
           << ")";
       break;
-    case Value::Kind::TypeOfInterfaceType:
-      out << "typeof("
-          << cast<TypeOfInterfaceType>(*this)
-                 .interface_type()
-                 .declaration()
-                 .name()
-          << ")";
-      break;
-    case Value::Kind::TypeOfConstraintType:
-      out << "typeof(" << cast<TypeOfConstraintType>(*this).constraint_type()
-          << ")";
-      break;
-    case Value::Kind::TypeOfChoiceType:
-      out << "typeof(" << cast<TypeOfChoiceType>(*this).choice_type().name()
-          << ")";
-      break;
     case Value::Kind::TypeOfParameterizedEntityName:
       out << "parameterized entity name "
           << cast<TypeOfParameterizedEntityName>(*this).name();
       break;
     case Value::Kind::TypeOfMemberName: {
-      out << "member name " << cast<TypeOfMemberName>(*this).member().name();
+      out << "member name " << cast<TypeOfMemberName>(*this).member();
       break;
     }
     case Value::Kind::StaticArrayType: {
@@ -629,15 +756,15 @@ auto TypeEqual(Nonnull<const Value*> t1, Nonnull<const Value*> t2,
     return true;
   }
   if (t1->kind() != t2->kind()) {
-    if (isa<AssociatedConstant>(t1) || isa<AssociatedConstant>(t2)) {
+    if (IsValueKindDependent(t1) || IsValueKindDependent(t2)) {
       return ValueEqual(t1, t2, equality_ctx);
     }
     return false;
   }
   switch (t1->kind()) {
     case Value::Kind::PointerType:
-      return TypeEqual(&cast<PointerType>(*t1).type(),
-                       &cast<PointerType>(*t2).type(), equality_ctx);
+      return TypeEqual(&cast<PointerType>(*t1).pointee_type(),
+                       &cast<PointerType>(*t2).pointee_type(), equality_ctx);
     case Value::Kind::FunctionType: {
       const auto& fn1 = cast<FunctionType>(*t1);
       const auto& fn2 = cast<FunctionType>(*t2);
@@ -663,14 +790,23 @@ auto TypeEqual(Nonnull<const Value*> t1, Nonnull<const Value*> t2,
       const auto& class1 = cast<NominalClassType>(*t1);
       const auto& class2 = cast<NominalClassType>(*t2);
       return class1.declaration().name() == class2.declaration().name() &&
-             BindingMapEqual(class1.type_args(), class2.type_args(),
+             BindingMapEqual(class1.bindings().args(), class2.bindings().args(),
                              equality_ctx);
     }
     case Value::Kind::InterfaceType: {
       const auto& iface1 = cast<InterfaceType>(*t1);
       const auto& iface2 = cast<InterfaceType>(*t2);
       return iface1.declaration().name() == iface2.declaration().name() &&
-             BindingMapEqual(iface1.args(), iface2.args(), equality_ctx);
+             BindingMapEqual(iface1.bindings().args(), iface2.bindings().args(),
+                             equality_ctx);
+    }
+    case Value::Kind::NamedConstraintType: {
+      const auto& constraint1 = cast<NamedConstraintType>(*t1);
+      const auto& constraint2 = cast<NamedConstraintType>(*t2);
+      return constraint1.declaration().name() ==
+                 constraint2.declaration().name() &&
+             BindingMapEqual(constraint1.bindings().args(),
+                             constraint2.bindings().args(), equality_ctx);
     }
     case Value::Kind::AssociatedConstant:
       // Associated constants are sometimes types.
@@ -718,9 +854,10 @@ auto TypeEqual(Nonnull<const Value*> t1, Nonnull<const Value*> t2,
     }
     case Value::Kind::ChoiceType:
       return cast<ChoiceType>(*t1).name() == cast<ChoiceType>(*t2).name();
+    case Value::Kind::TupleType:
     case Value::Kind::TupleValue: {
-      const auto& tup1 = cast<TupleValue>(*t1);
-      const auto& tup2 = cast<TupleValue>(*t2);
+      const auto& tup1 = cast<TupleValueBase>(*t1);
+      const auto& tup2 = cast<TupleValueBase>(*t2);
       if (tup1.elements().size() != tup2.elements().size()) {
         return false;
       }
@@ -740,21 +877,6 @@ auto TypeEqual(Nonnull<const Value*> t1, Nonnull<const Value*> t2,
     case Value::Kind::VariableType:
       return &cast<VariableType>(*t1).binding() ==
              &cast<VariableType>(*t2).binding();
-    case Value::Kind::TypeOfClassType:
-      return TypeEqual(&cast<TypeOfClassType>(*t1).class_type(),
-                       &cast<TypeOfClassType>(*t2).class_type(), equality_ctx);
-    case Value::Kind::TypeOfInterfaceType:
-      return TypeEqual(&cast<TypeOfInterfaceType>(*t1).interface_type(),
-                       &cast<TypeOfInterfaceType>(*t2).interface_type(),
-                       equality_ctx);
-    case Value::Kind::TypeOfConstraintType:
-      return TypeEqual(&cast<TypeOfConstraintType>(*t1).constraint_type(),
-                       &cast<TypeOfConstraintType>(*t2).constraint_type(),
-                       equality_ctx);
-    case Value::Kind::TypeOfChoiceType:
-      return TypeEqual(&cast<TypeOfChoiceType>(*t1).choice_type(),
-                       &cast<TypeOfChoiceType>(*t2).choice_type(),
-                       equality_ctx);
     case Value::Kind::StaticArrayType: {
       const auto& array1 = cast<StaticArrayType>(*t1);
       const auto& array2 = cast<StaticArrayType>(*t2);
@@ -834,11 +956,12 @@ auto ValueStructurallyEqual(
              body1.has_value() == body2.has_value() &&
              (!body1.has_value() || *body1 == *body2);
     }
+    case Value::Kind::TupleType:
     case Value::Kind::TupleValue: {
       const std::vector<Nonnull<const Value*>>& elements1 =
-          cast<TupleValue>(*v1).elements();
+          cast<TupleValueBase>(*v1).elements();
       const std::vector<Nonnull<const Value*>>& elements2 =
-          cast<TupleValue>(*v2).elements();
+          cast<TupleValueBase>(*v2).elements();
       if (elements1.size() != elements2.size()) {
         return false;
       }
@@ -892,6 +1015,7 @@ auto ValueStructurallyEqual(
     case Value::Kind::NominalClassType:
     case Value::Kind::MixinPseudoType:
     case Value::Kind::InterfaceType:
+    case Value::Kind::NamedConstraintType:
     case Value::Kind::ConstraintType:
     case Value::Kind::ImplWitness:
     case Value::Kind::BindingWitness:
@@ -901,11 +1025,7 @@ auto ValueStructurallyEqual(
     case Value::Kind::ContinuationType:
     case Value::Kind::VariableType:
     case Value::Kind::StringType:
-    case Value::Kind::TypeOfClassType:
     case Value::Kind::TypeOfMixinPseudoType:
-    case Value::Kind::TypeOfInterfaceType:
-    case Value::Kind::TypeOfConstraintType:
-    case Value::Kind::TypeOfChoiceType:
     case Value::Kind::TypeOfParameterizedEntityName:
     case Value::Kind::TypeOfMemberName:
     case Value::Kind::StaticArrayType:
@@ -942,7 +1062,7 @@ auto ValueEqual(Nonnull<const Value*> v1, Nonnull<const Value*> v2,
   // associated constant; otherwise we should be able to do better by looking
   // at the structures of the values.
   if (equality_ctx) {
-    if (isa<AssociatedConstant>(v1)) {
+    if (IsValueKindDependent(v1)) {
       auto visitor = [&](Nonnull<const Value*> maybe_v2) {
         return !ValueStructurallyEqual(v2, maybe_v2, equality_ctx);
       };
@@ -950,7 +1070,7 @@ auto ValueEqual(Nonnull<const Value*> v1, Nonnull<const Value*> v2,
         return true;
       }
     }
-    if (isa<AssociatedConstant>(v2)) {
+    if (IsValueKindDependent(v2)) {
       auto visitor = [&](Nonnull<const Value*> maybe_v1) {
         return !ValueStructurallyEqual(v1, maybe_v1, equality_ctx);
       };
@@ -976,7 +1096,7 @@ auto EqualityConstraint::VisitEqualValues(
 
   // The value is in this group; pass all non-identical values in the group
   // to the visitor. First visit the values we already compared.
-  for (auto* val : llvm::make_range(values.begin(), first_equal)) {
+  for (const auto* val : llvm::make_range(values.begin(), first_equal)) {
     if (!visitor(val)) {
       return false;
     }
@@ -984,7 +1104,7 @@ auto EqualityConstraint::VisitEqualValues(
   // Then visit any remaining non-identical values, skipping the one we already
   // found was identical.
   ++first_equal;
-  for (auto* val : llvm::make_range(first_equal, values.end())) {
+  for (const auto* val : llvm::make_range(first_equal, values.end())) {
     if (!ValueEqual(value, val, std::nullopt) && !visitor(val)) {
       return false;
     }
@@ -1014,9 +1134,10 @@ auto ChoiceType::FindAlternative(std::string_view name) const
   return std::nullopt;
 }
 
-auto NominalClassType::FindFunction(std::string_view name) const
+auto FindFunction(std::string_view name,
+                  llvm::ArrayRef<Nonnull<Declaration*>> members)
     -> std::optional<Nonnull<const FunctionValue*>> {
-  for (const auto& member : declaration().members()) {
+  for (const auto& member : members) {
     switch (member->kind()) {
       case DeclarationKind::MixDeclaration: {
         const auto& mix_decl = cast<MixDeclaration>(*member);
@@ -1069,6 +1190,18 @@ auto MixinPseudoType::FindFunction(const std::string_view& name) const
   return std::nullopt;
 }
 
+auto FindFunctionWithParents(std::string_view name,
+                             const ClassDeclaration& class_decl)
+    -> std::optional<Nonnull<const FunctionValue*>> {
+  if (auto fun = FindFunction(name, class_decl.members()); fun.has_value()) {
+    return fun;
+  }
+  if (const auto base_type = class_decl.base_type(); base_type.has_value()) {
+    return FindFunctionWithParents(name, base_type.value()->declaration());
+  }
+  return std::nullopt;
+}
+
 auto FindMember(std::string_view name,
                 llvm::ArrayRef<Nonnull<Declaration*>> members)
     -> std::optional<Nonnull<const Declaration*>> {
@@ -1089,6 +1222,22 @@ void ImplBinding::Print(llvm::raw_ostream& out) const {
 
 void ImplBinding::PrintID(llvm::raw_ostream& out) const {
   out << *type_var_ << " as " << **iface_;
+}
+
+auto NominalClassType::InheritsClass(Nonnull<const Value*> other) const
+    -> bool {
+  const auto* other_class = dyn_cast<NominalClassType>(other);
+  if (!other_class) {
+    return false;
+  }
+  std::optional<Nonnull<const NominalClassType*>> ancestor_class = this;
+  while (ancestor_class) {
+    if (TypeEqual(*ancestor_class, other_class, std::nullopt)) {
+      return true;
+    }
+    ancestor_class = (*ancestor_class)->base();
+  }
+  return false;
 }
 
 }  // namespace Carbon

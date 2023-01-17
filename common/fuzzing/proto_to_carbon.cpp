@@ -371,7 +371,7 @@ static auto ExpressionToCarbon(const Fuzzing::Expression& expression,
       break;
 
     case Fuzzing::Expression::kTypeTypeLiteral:
-      out << "Type";
+      out << "type";
       break;
 
     case Fuzzing::Expression::kUnimplementedExpression:
@@ -686,10 +686,10 @@ static auto DeclarationToCarbon(const Fuzzing::Declaration& declaration,
       out << "destructor";
       llvm::ListSeparator sep;
       out << "[";
-      if (function.has_me_pattern()) {
+      if (function.has_self_pattern()) {
         // This is a class method.
         out << sep;
-        PatternToCarbon(function.me_pattern(), out);
+        PatternToCarbon(function.self_pattern(), out);
       }
       out << "]";
 
@@ -707,17 +707,18 @@ static auto DeclarationToCarbon(const Fuzzing::Declaration& declaration,
       out << "fn ";
       IdentifierToCarbon(function.name(), out);
 
-      if (!function.deduced_parameters().empty() || function.has_me_pattern()) {
+      if (!function.deduced_parameters().empty() ||
+          function.has_self_pattern()) {
         out << "[";
         llvm::ListSeparator sep;
         for (const Fuzzing::GenericBinding& p : function.deduced_parameters()) {
           out << sep;
           GenericBindingToCarbon(p, out);
         }
-        if (function.has_me_pattern()) {
+        if (function.has_self_pattern()) {
           // This is a class method.
           out << sep;
-          PatternToCarbon(function.me_pattern(), out);
+          PatternToCarbon(function.self_pattern(), out);
         }
         out << "]";
       }
@@ -819,12 +820,10 @@ static auto DeclarationToCarbon(const Fuzzing::Declaration& declaration,
       PatternToCarbon(let.pattern(), out);
 
       // TODO: Print out the initializer once it's supported.
-      /*
-      if (let.has_initializer()) {
-        out << " = ";
-        ExpressionToCarbon(let.initializer(), out);
-      }
-      */
+      // if (let.has_initializer()) {
+      //   out << " = ";
+      //   ExpressionToCarbon(let.initializer(), out);
+      // }
       out << ";";
       break;
     }
@@ -857,7 +856,19 @@ static auto DeclarationToCarbon(const Fuzzing::Declaration& declaration,
         out << "\n";
       }
       out << "}";
-      // TODO: need to handle interface.self()?
+      break;
+    }
+
+    case Fuzzing::Declaration::kConstraint: {
+      const auto& constraint = declaration.constraint();
+      out << "constraint ";
+      IdentifierToCarbon(constraint.name(), out);
+      out << " {\n";
+      for (const auto& member : constraint.members()) {
+        DeclarationToCarbon(member, out);
+        out << "\n";
+      }
+      out << "}";
       break;
     }
 
@@ -873,6 +884,17 @@ static auto DeclarationToCarbon(const Fuzzing::Declaration& declaration,
       out << " {\n";
       for (const auto& member : impl.members()) {
         DeclarationToCarbon(member, out);
+        out << "\n";
+      }
+      out << "}";
+      break;
+    }
+
+    case Fuzzing::Declaration::kMatchFirst: {
+      const auto& match_first = declaration.match_first();
+      out << "__match_first {\n";
+      for (const auto& impl : match_first.impls()) {
+        DeclarationToCarbon(impl, out);
         out << "\n";
       }
       out << "}";
